@@ -13,7 +13,7 @@ export default function addElevation(
 
     let elevations: number[];
     try {
-      elevations = await loadElevations(
+      elevations = await fetchElevationsWithBrowserHeaders(
         // Elevation service expects lat,lng order instead of lng,lat of GeoJSON
         Array.from(coordinates)
           .concat(elevationProfileCoordinates)
@@ -76,6 +76,92 @@ async function loadElevations(
 
   return elevations;
 }
+
+async function fetchElevationsWithBrowserHeaders(
+  coordinates: number[][],
+  elevationServerURL: string
+): Promise<number[]> {
+  const elevations: number[] = [];
+  const elevationCache = new Map<string, number>(); // Cache to reduce redundant requests
+  const maxRetryTime = 600_000; // 10 minutes in milliseconds
+
+  for (const [lat, lng] of coordinates) {
+    let success = false;
+    let elevation: number | null = null;
+    const cacheKey = `${lat},${lng}`;
+    let startTime = Date.now();
+    let attempts = 0;
+    let retryDelay = 1000; // Initial delay (1 second)
+
+    while (!success) {
+      try {
+        // If 10 minutes have passed, stop retrying and mark as failed
+        if (Date.now() - startTime > maxRetryTime) {
+          console.error(`Timeout: Failed to fetch elevation for (${lat}, ${lng}) after 10 minutes.`);
+          break;
+        }
+
+        // Use cache if available
+        if (elevationCache.has(cacheKey)) {
+          elevations.push(elevationCache.get(cacheKey)!);
+          success = true;
+          break;
+        }
+
+        // Introduce a random delay to simulate human behavior 
+        const randomDelay = Math.random() * (10000 - 7000) + 7000;
+        await new Promise(resolve => setTimeout(resolve, randomDelay));
+
+        const response = await fetch(`${elevationServerURL}/api/?lat=${lat}&lng=${lng}`, {
+          method: "GET",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/",
+            "DNT": "1", // Do Not Track
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          },
+        });
+
+        if (response.status === 429) {
+          // Rate limit hit, wait using exponential backoff
+          console.warn(`Rate limit hit for (${lat}, ${lng}). Retrying in ${retryDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          retryDelay = Math.min(retryDelay * 2, 60000); // Exponential backoff (capped at 60s)
+          attempts++;
+          continue;
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} for (${lat}, ${lng})`);
+        }
+
+        elevation = await response.json(); // Expecting a direct number response
+        if (typeof elevation !== "number") {
+          throw new Error(`Invalid response type for (${lat}, ${lng}): ${elevation}`);
+        }
+
+        // Cache the elevation data
+        elevationCache.set(cacheKey, elevation);
+        success = true;
+        elevations.push(elevation);
+      } catch (error) {
+        console.error(`Attempt ${attempts + 1} failed for (${lat}, ${lng}):`, error);
+        attempts++;
+      }
+    }
+
+    if (!success) {
+      console.error(`Failed to fetch elevation for (${lat}, ${lng}) after 10 minutes.`);
+      elevations.push(NaN);
+    }
+  }
+
+  return elevations;
+}
+
 
 function getCoordinates(feature: RunFeature | LiftFeature) {
   let coordinates: number[][];
